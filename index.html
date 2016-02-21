@@ -1,0 +1,196 @@
+<!doctype html>
+<meta charset=utf-8>
+
+<title>Using k-means clustering to extract colour features from images</title>
+
+<style>
+html {
+	overflow-y: auto;
+}
+body {
+	text-align:center;
+	color: black;
+}
+#worker {
+	display: inline-block;
+	position:relative;
+	width:500px;
+	padding: 0; margin: 0;
+	left:32px;
+}
+#loading, #colors {
+	position:absolute;
+	top:0;left:0;
+	width:100%;height:100%;
+}
+#image {
+	display: inline-block;
+	width: auto;
+	padding:0;
+}
+#loading {
+	display:none;
+	z-index:1000;
+	background-color:#CCC;
+}
+.loading #loading { display:block; }
+.color, img, #worker, #config > div { display:inline-block; }
+#image, .color, #worker { height:120px; }
+
+@-webkit-keyframes 'spin' { 0% { -webkit-transform: rotate(0deg); } 100% { -webkit-transform: rotate(360deg); } }
+@-moz-keyframes 'spin' { 0% { -moz-transform: rotate(0deg); } 100% { -moz-transform: rotate(360deg); } }
+@-ms-keyframes 'spin' { 0% { -ms-transform: rotate(0deg); } 100% { -ms-transform: rotate(360deg); } }
+@-o-keyframes 'spin' { 0% { -o-transform: rotate(0deg); } 100% { -o-transform: rotate(360deg); } }
+@keyframes 'spin' { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+#spinner {
+	position:absolute;
+	top:50%;left:50%;
+	width:2px;margin-left:-1px;
+	height:40px;margin-top:-20px;
+	background-color:black;
+
+	-webkit-animation: 'spin' .6s infinite linear;
+	-moz-animation: 'spin' .6s infinite linear;
+	-ms-animation: 'spin' .6s infinite linear;
+	-o-animation: 'spin' .6s infinite linear;
+	animation: 'spin' .6s infinite linear;
+}
+</style>
+<style id=colorscheme></style>
+<script type=worker>
+self.addEventListener('message', (function () {
+	var startingPoints = function (n) { //n points evenly distributed between 0 and 255
+		for (var o = [], step = 255 / (n + 1), i = step; i < 255; i+=step) {
+			o.push([i,i,i]);
+		};
+		return o;
+	},
+	blackArray = function (len) { //returns an array full of [0,0,0]s (black pixels)
+		for (var array = [], i = 0; i<len; i++) array.push([0,0,0]);
+		return array;
+	},
+	distance = function (a, b) { //distance (squared) between 2 points in n-dimensional space
+		for (var i = 0, s = 0, l = a.length; i < l; i++) {
+			s += Math.pow(a[i] - b[i], 2);
+		}
+		return s;
+	},
+	closest = function (point, points) { //find the index of the closest point from a list of points
+		return points.map(function (p, pindex) { //create an array of distances to the points
+			return [distance(point, p), pindex];
+		}).reduce(function (prev, curr) { //return the index of the closest point
+			if (!prev || curr[0] < prev[0]) return curr;
+			return prev;
+		})[1];
+	},
+	n = 4,
+	arraySlice = Array.prototype.slice;
+	return function (e) {
+		var data = e.data,
+		bytes = data.length,
+		pixels = bytes/4,
+		points = startingPoints(n),
+		changes = [],
+		i = 0, c = [], sum = [], count = [], changes = [], pixel;
+		if (data instanceof Number) { n = data; return; }
+		for (times = 100; times > 0; times--) { //maximum of 100 iterations
+			sum = blackArray(n);
+			count = [];
+			for (i = 0; i < bytes; i+=4) { //for each pixel
+				pixel = data.subarray(i, i+3);
+				c = closest(pixel, points); //find the index of the closest point
+				count[c] = count[c] === undefined ? 1 : count[c] + 1; //add 1 to the count for the point
+				Array.prototype.forEach.call(pixel, function (p, j) {
+					sum[c][j] += p-points[c][j]; //add the difference between this pixel and the point to the sum array
+				});
+			};
+			changes = sum.map(function(point, i) {
+				return point.map(function (x, j) { return x / count[i] * 0.9; });
+			});
+			points = changes.map(function(change, i) { //move the points closer to the mean of the pixels they're associated with
+				return change.map(function (x, j) { return change[j]+points[i][j]; });
+			});
+			//end the loop if the points didn't move much
+			if (changes.reduce(function (prev, change) { return Math.max.apply(Math, change.map(Math.abs)) > 0.1 ? false : prev; }, true)) break;
+		};
+		self.postMessage(points.map(function (point, index) { return { r: Math.floor(point[0]), g: Math.floor(point[1]), b: Math.floor(point[2]), coverage: count[index]/pixels }; }));
+	};
+})());
+</script>
+
+<body lang=en>
+<img id=image src="/pages/kmean/a.jpg">
+<div id=worker>
+	<div id=loading><div id=spinner></div></div>
+	<div id=colors></div>
+</div>
+<div id=config>
+	<div style="display:none;">File: <input id=file type=file></div>
+	<div>
+		Colours: 
+		<input id=nInput type=range min=2 max=10 value=4>
+		<div id=n>4</div>
+	</div>
+	<div><input type=button id=submit value=Extract!></div>
+</div>
+<script>
+	var getData = function (image, width, height, callback) { //passes imageData object to callback http://www.whatwg.org/specs/web-apps/current-work/multipage/the-canvas-element.html#imagedata
+		var canvas = document.createElement('canvas');
+		var drawing = canvas.getContext('2d');
+		canvas.width = width; canvas.height = height;
+		drawing.drawImage(image, 0, 0, width, height);
+		callback(drawing.getImageData(0, 0, width, height));
+	};
+
+	//load the worker thread
+	var worker = new Worker(window.URL.createObjectURL(new Blob([document.querySelector('script[type=worker]').textContent], {'type':'application/javascript'})));
+	
+	//helper functions
+	var toRGB = function (c) {
+		if (c) return 'rgb('+c.r+','+c.g+','+c.b+')';
+	},
+	toElement = function (c) {
+		var color = document.createElement('div');
+		color.setAttribute('class','color');
+		color.setAttribute('style','background-color:'+toRGB(c)+';width:'+Math.floor(c.coverage*100)+'%;');
+		return color;
+	},
+	//find elements
+	$colors = document.getElementById('colors'),
+	$style = document.getElementById('colorscheme'),
+	$img = document.getElementById('image'),
+	$worker = document.getElementById('worker'),
+	$nInput = document.getElementById('nInput'),
+	$n = document.getElementById('n'),
+	$file = document.getElementById('file'),
+	$submit = document.getElementById('submit');
+	$nInput.addEventListener('change',function () {
+		var n = new Number(this.value);
+		$n.innerText = n;
+		worker.postMessage(n);
+	});
+	$file.addEventListener('change',function () {
+		var reader = new FileReader()
+		reader.onload = function(e) {
+			$img.setAttribute('src',e.target.result);
+		};
+		reader.readAsDataURL($file.files[0]);
+	});
+
+	$submit.addEventListener('click', function () {
+		getData($img, 200, 200, function (d) { //when the image has loaded, send imageData object to the worker
+			$worker.classList.add('loading');
+			worker.postMessage(d.data);
+		});
+	});
+
+	worker.addEventListener('message', function (e) {
+		var colors = e.data;
+		//console.debug('worker',colors);
+
+		//create color elements then add them to the colors element
+		$colors.innerHTML = '';
+		colors.map(toElement).map($colors.appendChild, $colors); 
+		$worker.classList.remove('loading');
+	});
+</script>
